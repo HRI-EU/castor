@@ -20,7 +20,8 @@ import io.carbynestack.castor.common.entities.TupleType;
 import io.carbynestack.castor.common.exceptions.CastorClientException;
 import io.carbynestack.castor.common.exceptions.CastorServiceException;
 import io.carbynestack.castor.common.websocket.UploadTupleChunkResponse;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetaDataStorageService;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentEntity;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentStorageService;
 import io.carbynestack.castor.service.persistence.tuplestore.TupleStore;
 import java.util.UUID;
 import org.apache.commons.lang3.RandomUtils;
@@ -43,7 +44,7 @@ public class DefaultCastorWebSocketServiceTest {
 
   @Mock private SimpMessagingTemplate messagingTemplateMock;
 
-  @Mock private TupleChunkMetaDataStorageService metaDataStoreMock;
+  @Mock private TupleChunkFragmentStorageService fragmentStorageService;
 
   @InjectMocks private DefaultCastorWebSocketService castorWebSocketService;
 
@@ -123,8 +124,8 @@ public class DefaultCastorWebSocketServiceTest {
     castorWebSocketService.uploadTupleChunk(null, payload);
 
     verify(tupleStoreMock).save(tupleChunk);
-    verify(metaDataStoreMock)
-        .keepTupleChunkData(chunkId, tupleType, tupleChunk.getNumberOfTuples());
+    verify(fragmentStorageService)
+        .keep(TupleChunkFragmentEntity.of(chunkId, tupleType, 0, tupleChunk.getNumberOfTuples()));
 
     verify(messagingTemplateMock, times(1))
         .convertAndSend(
