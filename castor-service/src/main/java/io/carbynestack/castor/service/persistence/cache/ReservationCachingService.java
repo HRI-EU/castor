@@ -12,6 +12,7 @@ import io.carbynestack.castor.common.entities.Reservation;
 import io.carbynestack.castor.common.entities.ReservationElement;
 import io.carbynestack.castor.common.exceptions.CastorServiceException;
 import io.carbynestack.castor.service.config.CastorCacheProperties;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentEntity;
 import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentStorageService;
 import javax.annotation.Nullable;
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +30,8 @@ public class ReservationCachingService {
       "No reservation was found for requestId %s.";
   public static final String RESERVATION_CONFLICT_EXCEPTION_MSG =
       "Reservation conflict. Reservation with ID #%s already exists.";
+  public static final String RE_CANNOT_BE_SATISFIED_EXCEPTION_FORMAT =
+      "No fragment found to fulfill given reservation: %s";
   public static final String FAILED_UPDATING_RESERVATION_EXCEPTION_MSG =
       "Failed updating reservation marker for chunk #%s.";
   private final ConsumptionCachingService consumptionCachingService;
@@ -65,7 +68,7 @@ public class ReservationCachingService {
     if (ops.get(cachePrefix + reservation.getReservationId()) == null) {
       ops.set(cachePrefix + reservation.getReservationId(), reservation);
       log.debug("put in database at {}", cachePrefix + reservation.getReservationId());
-      tupleChunkFragmentStorageService.applyReservation(reservation);
+      applyReservationRequiresTransaction(reservation);
       log.debug("fragments updated.");
       consumptionCachingService.keepConsumption(
           System.currentTimeMillis(),
@@ -77,6 +80,39 @@ public class ReservationCachingService {
     } else {
       throw new CastorServiceException(
           String.format(RESERVATION_CONFLICT_EXCEPTION_MSG, reservation.getReservationId()));
+    }
+  }
+
+  /**
+   * Reserve tuples as described by the given {@link Reservation}.
+   *
+   * @param reservation The {@link Reservation} to process.
+   * @throws CastorServiceException if the tuples could not be reserved as requested.
+   */
+  protected void applyReservationRequiresTransaction(Reservation reservation) {
+    log.debug("Apply reservation {}", reservation);
+    for (ReservationElement re : reservation.getReservations()) {
+      log.debug("Processing reservation element {}", re);
+      long startIndex = re.getStartIndex();
+      long endIndex = startIndex + re.getReservedTuples();
+      while (startIndex < endIndex) {
+        TupleChunkFragmentEntity fragment =
+            tupleChunkFragmentStorageService
+                .findAvailableFragmentForChunkContainingIndex(re.getTupleChunkId(), startIndex)
+                .orElseThrow(
+                    () ->
+                        new CastorServiceException(
+                            String.format(RE_CANNOT_BE_SATISFIED_EXCEPTION_FORMAT, reservation)));
+        if (fragment.getStartIndex() < startIndex) {
+          fragment = tupleChunkFragmentStorageService.splitBefore(fragment, startIndex);
+        }
+        if (endIndex < fragment.getEndIndex()) {
+          fragment = tupleChunkFragmentStorageService.splitAt(fragment, endIndex);
+        }
+        fragment.setReservationId(reservation.getReservationId());
+        tupleChunkFragmentStorageService.update(fragment);
+        startIndex = fragment.getEndIndex();
+      }
     }
   }
 

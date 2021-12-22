@@ -7,8 +7,6 @@
 
 package io.carbynestack.castor.service.download;
 
-import static java.lang.Math.min;
-
 import io.carbynestack.castor.client.download.CastorInterVcpClient;
 import io.carbynestack.castor.common.entities.Reservation;
 import io.carbynestack.castor.common.entities.ReservationElement;
@@ -16,8 +14,8 @@ import io.carbynestack.castor.common.entities.TupleType;
 import io.carbynestack.castor.common.exceptions.CastorClientException;
 import io.carbynestack.castor.common.exceptions.CastorServiceException;
 import io.carbynestack.castor.service.persistence.cache.ReservationCachingService;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetaDataEntity;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetaDataStorageService;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentEntity;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentStorageService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -32,12 +30,12 @@ final class CreateReservationSupplier implements Supplier<Reservation> {
       "Insufficient Tuples of type %s available (%s out of %s)";
   public static final String SHARING_RESERVATION_FAILED_EXCEPTION_MSG =
       "Sharing reservation with slave services failed.";
-  public static final String FAILED_RESERVE_AMOUNT_TUPLES_EXCEPTION_MSG =
-      "Failed to reserve the requested amount of tuples (%s) although available  %d out of %d"
-          + " available.";
+  public static final String FAILED_RESERVE_TUPLES_EXCEPTION_MSG = "Failed to reserve the tuples.";
+  public static final String FAILED_FETCH_AVAILABLE_FRAGMENT_EXCEPTION_MSG =
+      "Unable to locate available tuples.";
   final CastorInterVcpClient castorInterVcpClient;
   final ReservationCachingService reservationCache;
-  final TupleChunkMetaDataStorageService tupleChunkMetaDataStorageService;
+  final TupleChunkFragmentStorageService fragmentStorageService;
   final String reservationId;
   final TupleType tupleType;
   final long count;
@@ -51,7 +49,7 @@ final class CreateReservationSupplier implements Supplier<Reservation> {
    */
   @Override
   public Reservation get() {
-    List<ReservationElement> reservationElements = composeElements(tupleType, count);
+    List<ReservationElement> reservationElements = composeElements(tupleType, count, reservationId);
     log.debug("Reservation composed.");
     Reservation reservation = new Reservation(reservationId, tupleType, reservationElements);
     reservationCache.keepReservation(reservation);
@@ -68,8 +66,9 @@ final class CreateReservationSupplier implements Supplier<Reservation> {
    * @throws CastorServiceException if reserving the requested amount of tuples failed, although
    *     there are enough tuples available
    */
-  private List<ReservationElement> composeElements(TupleType tupleType, long numberOfTuples) {
-    long availableTuples = tupleChunkMetaDataStorageService.getAvailableTuples(tupleType);
+  private List<ReservationElement> composeElements(
+      TupleType tupleType, long numberOfTuples, String reservationId) {
+    long availableTuples = fragmentStorageService.getAvailableTuples(tupleType);
     if (availableTuples < numberOfTuples) {
       throw new CastorServiceException(
           String.format(
@@ -77,29 +76,34 @@ final class CreateReservationSupplier implements Supplier<Reservation> {
     }
     List<ReservationElement> reservationElements = new ArrayList<>();
     long stillToReserve = numberOfTuples;
-
-    List<TupleChunkMetaDataEntity> tupleChunkDataList =
-        tupleChunkMetaDataStorageService.getTupleChunkData(tupleType);
-    for (TupleChunkMetaDataEntity tupleChunkData : tupleChunkDataList) {
-      long tuplesToRead =
-          min(
-              tupleChunkData.getNumberOfTuples() - tupleChunkData.getReservedMarker(),
-              stillToReserve);
-      reservationElements.add(
-          new ReservationElement(
-              tupleChunkData.getTupleChunkId(), tuplesToRead, tupleChunkData.getReservedMarker()));
-      stillToReserve -= tuplesToRead;
+    while (stillToReserve > 0) {
+      try {
+        TupleChunkFragmentEntity availableFragment =
+            fragmentStorageService
+                .findAvailableFragmentWithTupleType(tupleType)
+                .orElseThrow(
+                    () ->
+                        new CastorServiceException(FAILED_FETCH_AVAILABLE_FRAGMENT_EXCEPTION_MSG));
+        long tuplesInFragment = availableFragment.getEndIndex() - availableFragment.getStartIndex();
+        if (tuplesInFragment > stillToReserve) {
+          availableFragment =
+              fragmentStorageService.splitAt(
+                  availableFragment, availableFragment.getStartIndex() + stillToReserve);
+        }
+        availableFragment.setReservationId(reservationId);
+        fragmentStorageService.update(availableFragment);
+        long tuplesTaken = Math.min(tuplesInFragment, stillToReserve);
+        stillToReserve -= tuplesTaken;
+        reservationElements.add(
+            new ReservationElement(
+                availableFragment.getTupleChunkId(),
+                tuplesTaken,
+                availableFragment.getStartIndex()));
+      } catch (Exception e) {
+        throw new CastorServiceException(FAILED_RESERVE_TUPLES_EXCEPTION_MSG, e);
+      }
     }
-    if (stillToReserve > 0) {
-      throw new CastorServiceException(
-          String.format(
-              FAILED_RESERVE_AMOUNT_TUPLES_EXCEPTION_MSG,
-              tupleType,
-              (numberOfTuples - stillToReserve),
-              numberOfTuples));
-    }
-    log.debug(
-        "Preparing reservation of {} {}: {}.", numberOfTuples, tupleType, reservationElements);
+    log.debug("Composed reservation of {} {}: {}.", numberOfTuples, tupleType, reservationElements);
     return reservationElements;
   }
 }

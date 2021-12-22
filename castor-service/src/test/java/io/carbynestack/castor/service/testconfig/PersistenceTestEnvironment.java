@@ -10,7 +10,6 @@ import io.carbynestack.castor.common.entities.TupleType;
 import io.carbynestack.castor.service.config.CastorCacheProperties;
 import io.carbynestack.castor.service.config.MinioProperties;
 import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentRepository;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetadataRepository;
 import io.minio.*;
 import io.vavr.control.Try;
 import java.util.Arrays;
@@ -23,7 +22,6 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class PersistenceTestEnvironment {
-  @Autowired private TupleChunkMetadataRepository tupleChunkMetadataRepository;
   @Autowired private TupleChunkFragmentRepository tupleChunkFragmentRepository;
 
   @Autowired private CacheManager cacheManager;
@@ -36,7 +34,6 @@ public class PersistenceTestEnvironment {
 
   @SneakyThrows
   public void clearAllData() {
-    tupleChunkMetadataRepository.deleteAll();
     tupleChunkFragmentRepository.deleteAll();
     Arrays.stream(TupleType.values())
         .forEach(

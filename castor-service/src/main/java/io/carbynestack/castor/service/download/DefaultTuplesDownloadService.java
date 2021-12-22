@@ -13,8 +13,7 @@ import io.carbynestack.castor.common.exceptions.CastorClientException;
 import io.carbynestack.castor.common.exceptions.CastorServiceException;
 import io.carbynestack.castor.service.config.CastorSlaveServiceProperties;
 import io.carbynestack.castor.service.persistence.cache.ReservationCachingService;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetaDataEntity;
-import io.carbynestack.castor.service.persistence.markerstore.TupleChunkMetaDataStorageService;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentStorageService;
 import io.carbynestack.castor.service.persistence.tuplestore.TupleStore;
 import java.util.Optional;
 import java.util.UUID;
@@ -45,7 +44,7 @@ public class DefaultTuplesDownloadService implements TuplesDownloadService {
   public static final String FAILED_RETRIEVING_TUPLES_EXCEPTION_MSG =
       "Failed retrieving tuples from database.";
   private final TupleStore tupleStore;
-  private final TupleChunkMetaDataStorageService markerStore;
+  private final TupleChunkFragmentStorageService fragmentStorageService;
   private final ReservationCachingService reservationCachingService;
   private final CastorSlaveServiceProperties slaveServiceProperties;
   private final Optional<CastorInterVcpClient> castorInterVcpClientOptional;
@@ -75,7 +74,7 @@ public class DefaultTuplesDownloadService implements TuplesDownloadService {
       reservation = obtainReservation(reservationId);
     }
     TupleList<T, F> result = consumeReservation(tupleCls, field, reservation);
-    deleteTupleChunksAndMarkerIfUsed(reservation);
+    deleteReservedFragments(reservation);
     reservationCachingService.forgetReservation(reservationId);
     return result;
   }
@@ -106,7 +105,7 @@ public class DefaultTuplesDownloadService implements TuplesDownloadService {
                     new CreateReservationSupplier(
                         castorInterVcpClientOptional.get(),
                         reservationCachingService,
-                        markerStore,
+                        fragmentStorageService,
                         reservationId,
                         tupleType,
                         count));
@@ -192,15 +191,12 @@ public class DefaultTuplesDownloadService implements TuplesDownloadService {
   }
 
   /** @throws CastorServiceException if metadata cannot be updated */
-  private void deleteTupleChunksAndMarkerIfUsed(Reservation reservation) {
+  private void deleteReservedFragments(Reservation reservation) {
+    fragmentStorageService.deleteAllForReservationId(reservation.getReservationId());
     for (ReservationElement reservationElement : reservation.getReservations()) {
-      UUID tupleChunkId = reservationElement.getTupleChunkId();
-      TupleChunkMetaDataEntity tupleChunkData =
-          markerStore.updateConsumptionForTupleChunkData(
-              tupleChunkId, reservationElement.getReservedTuples());
-      if (tupleChunkData.getConsumedMarker() == tupleChunkData.getNumberOfTuples()) {
-        markerStore.forgetTupleChunkData(tupleChunkId);
-        tupleStore.deleteTupleChunk(tupleChunkId);
+      if (!fragmentStorageService.isChunkReferencedByFragments(
+          reservationElement.getTupleChunkId())) {
+        tupleStore.deleteTupleChunk(reservationElement.getTupleChunkId());
       }
     }
   }

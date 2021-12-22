@@ -26,8 +26,6 @@ public class TupleChunkFragmentStorageService {
   public static final String CONFLICT_EXCEPTION_MSG =
       "At least one tuple described by the given sequence is already referenced by another"
           + " TupleChunkFragment";
-  public static final String RE_CANNOT_BE_SATISFIED_EXCEPTION_FORMAT =
-      "No fragment found to fulfill given reservation: %s";
   public static final String NOT_A_SINGLE_FRAGMENT_FOR_CHUNK_ERROR_MSG =
       "Not a single fragment associated with the given identifier.";
 
@@ -99,56 +97,63 @@ public class TupleChunkFragmentStorageService {
   }
 
   /**
-   * Reserve tuples as described by the given {@link Reservation}.
+   * Splits a {@link TupleChunkFragmentEntity} at the given index by setting the {@link
+   * TupleChunkFragmentEntity#endIndex} to the given index and creating an additional {@link
+   * TupleChunkFragmentEntity} for the remaining tuples.
    *
-   * @param reservation The {@link Reservation} to process.
-   * @throws CastorServiceException if the tuples could not be reserved as requested.
+   * <p>The given fragment will remain untouched if the defined index is not <b>within</b> the
+   * fragment's bounds.
+   *
+   * @param fragment the {@link TupleChunkFragmentEntity} to split.
+   * @param index the index where to split the given fragment (<b>exclusive</b> to the returned,
+   *     initial fragment)
+   * @return the given fragment with its reduced size
    */
   @Transactional
-  public void applyReservation(Reservation reservation) {
-    log.debug("Apply reservation {}", reservation);
-    for (ReservationElement re : reservation.getReservations()) {
-      log.debug("Processing reservation element {}", re);
-      long startIndex = re.getStartIndex();
-      long endIndex = startIndex + re.getReservedTuples();
-      while (startIndex < endIndex) {
-        TupleChunkFragmentEntity fragment =
-            fragmentRepository
-                .findAvailableFragmentForTupleChunkContainingIndex(re.getTupleChunkId(), startIndex)
-                .orElseThrow(
-                    () ->
-                        new CastorServiceException(
-                            String.format(RE_CANNOT_BE_SATISFIED_EXCEPTION_FORMAT, reservation)));
-        if (fragment.getStartIndex() < startIndex) {
-          TupleChunkFragmentEntity nf =
-              TupleChunkFragmentEntity.of(
-                  fragment.getTupleChunkId(),
-                  fragment.getTupleType(),
-                  startIndex,
-                  fragment.getEndIndex(),
-                  fragment.getActivationStatus(),
-                  fragment.getReservationId());
-          fragment.setEndIndex(startIndex);
-          fragmentRepository.save(fragment);
-          fragment = nf;
-        }
-        if (endIndex < fragment.getEndIndex()) {
-          TupleChunkFragmentEntity nf =
-              TupleChunkFragmentEntity.of(
-                  fragment.getTupleChunkId(),
-                  fragment.getTupleType(),
-                  endIndex,
-                  fragment.getEndIndex(),
-                  fragment.getActivationStatus(),
-                  fragment.getReservationId());
-          fragment.setEndIndex(endIndex);
-          fragmentRepository.save(nf);
-        }
-        fragment.setReservationId(reservation.getReservationId());
-        fragmentRepository.save(fragment);
-        startIndex = fragment.getEndIndex();
-      }
+  public TupleChunkFragmentEntity splitAt(TupleChunkFragmentEntity fragment, long index) {
+    TupleChunkFragmentEntity nf =
+        TupleChunkFragmentEntity.of(
+            fragment.getTupleChunkId(),
+            fragment.getTupleType(),
+            index,
+            fragment.getEndIndex(),
+            fragment.getActivationStatus(),
+            fragment.getReservationId());
+    fragmentRepository.save(nf);
+    fragment.setEndIndex(index);
+    return fragmentRepository.save(fragment);
+  }
+
+  /**
+   * Splits a {@link TupleChunkFragmentEntity} at the given index by setting the {@link
+   * TupleChunkFragmentEntity#startIndex} to the given index and creating an additional {@link
+   * TupleChunkFragmentEntity} for the remaining tuples.
+   *
+   * <p>The given fragment will remain untouched if the defined index is not <b>within</b> the
+   * fragment's bounds.
+   *
+   * @param fragment the {@link TupleChunkFragmentEntity} to split.
+   * @param index the index where to split the given fragment (<b>inclusive</b> to the newly created
+   *     fragment)
+   * @return the newly created fragment beginning at the given index or the untouched fragment if
+   *     the split index is not within the fragment's range
+   */
+  @Transactional
+  public TupleChunkFragmentEntity splitBefore(TupleChunkFragmentEntity fragment, long index) {
+    if (index <= fragment.getStartIndex() || index >= fragment.getEndIndex()) {
+      return fragment;
     }
+    TupleChunkFragmentEntity nf =
+        TupleChunkFragmentEntity.of(
+            fragment.getTupleChunkId(),
+            fragment.getTupleType(),
+            index,
+            fragment.getEndIndex(),
+            fragment.getActivationStatus(),
+            fragment.getReservationId());
+    fragment.setEndIndex(index);
+    fragmentRepository.save(fragment);
+    return fragmentRepository.save(nf);
   }
 
   /**
@@ -197,7 +202,6 @@ public class TupleChunkFragmentStorageService {
     if (fragmentRepository.unlockAllForTupleChunk(chunkId) <= 0) {
       throw new CastorServiceException(NOT_A_SINGLE_FRAGMENT_FOR_CHUNK_ERROR_MSG);
     }
-    ;
   }
 
   /**
@@ -218,7 +222,13 @@ public class TupleChunkFragmentStorageService {
    * @return <code>true</code> if any {@link TupleChunkFragmentEntity fragment} is associated with
    *     the given chunk id, <code>false</code> if not.
    */
+  @Transactional(readOnly = true)
   public boolean isChunkReferencedByFragments(UUID tupleChunkId) {
     return fragmentRepository.existsByTupleChunkId(tupleChunkId);
+  }
+
+  @Transactional
+  public void update(TupleChunkFragmentEntity fragment) {
+    fragmentRepository.save(fragment);
   }
 }

@@ -14,9 +14,6 @@ import static java.util.Collections.singletonList;
 import static org.junit.Assert.*;
 import static org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT;
 
-import com.google.common.collect.Lists;
-import io.carbynestack.castor.common.entities.Reservation;
-import io.carbynestack.castor.common.entities.ReservationElement;
 import io.carbynestack.castor.common.entities.TupleType;
 import io.carbynestack.castor.common.exceptions.CastorClientException;
 import io.carbynestack.castor.service.CastorServiceApplication;
@@ -346,65 +343,6 @@ public class TupleChunkFragmentStorageServiceIT {
                 fragmentStorageService.checkNoConflict(
                     tupleChunkId, requestedStartIndex, requestedEndIndex));
     assertEquals(CONFLICT_EXCEPTION_MSG, actualCce.getMessage());
-  }
-
-  @Test
-  public void whenReferencedSequenceIsSplitInFragments_whenApplyReservation_thenApplyAccordingly() {
-    UUID tupleChunkId = UUID.fromString("3fd7eaf7-cda3-4384-8d86-2c43450cbe63");
-    long requestedStartIndex = 42;
-    long requestedLength = 21;
-    ReservationElement re =
-        new ReservationElement(tupleChunkId, requestedLength, requestedStartIndex);
-    String reservationId = "testReservation";
-    TupleType tupleType = TupleType.MULTIPLICATION_TRIPLE_GFP;
-    Reservation r = new Reservation(reservationId, tupleType, singletonList(re));
-
-    TupleChunkFragmentEntity fragmentBefore =
-        TupleChunkFragmentEntity.of(
-            tupleChunkId, tupleType, 0, requestedStartIndex, UNLOCKED, null);
-    TupleChunkFragmentEntity fragmentPart1 =
-        TupleChunkFragmentEntity.of(
-            tupleChunkId,
-            tupleType,
-            requestedStartIndex,
-            requestedStartIndex + requestedLength - 5,
-            UNLOCKED,
-            null);
-    TupleChunkFragmentEntity fragmentContainingRest =
-        TupleChunkFragmentEntity.of(
-            tupleChunkId,
-            tupleType,
-            requestedStartIndex + requestedLength - 5,
-            Long.MAX_VALUE,
-            UNLOCKED,
-            null);
-
-    fragmentBefore = fragmentRepository.save(fragmentBefore);
-    fragmentPart1 = fragmentRepository.save(fragmentPart1);
-    fragmentContainingRest = fragmentRepository.save(fragmentContainingRest);
-
-    fragmentStorageService.applyReservation(r);
-    List<TupleChunkFragmentEntity> actualFragments =
-        Lists.newArrayList(fragmentRepository.findAll());
-    // fragment remains unchanged since it does not hold any tuples of interest
-    assertTrue(actualFragments.remove(fragmentBefore));
-    // fragment which is of interest as it is gets reserved
-    assertTrue(actualFragments.remove(fragmentPart1.setReservationId(reservationId)));
-    // fragment which contains some tuples of iterest gets split and first part is reserved
-    assertTrue(
-        actualFragments.remove(
-            fragmentContainingRest
-                .setEndIndex(requestedStartIndex + requestedLength)
-                .setReservationId(reservationId)));
-    // remnant of previous fragment got created and is available
-    assertEquals(1, actualFragments.size());
-    TupleChunkFragmentEntity lastFragment = actualFragments.get(0);
-    assertEquals(tupleChunkId, lastFragment.getTupleChunkId());
-    assertEquals(tupleType, lastFragment.getTupleType());
-    assertEquals(Long.MAX_VALUE, lastFragment.getEndIndex());
-    assertEquals(requestedStartIndex + requestedLength, lastFragment.getStartIndex());
-    assertEquals(UNLOCKED, lastFragment.getActivationStatus());
-    assertNull(lastFragment.getReservationId());
   }
 
   @Test

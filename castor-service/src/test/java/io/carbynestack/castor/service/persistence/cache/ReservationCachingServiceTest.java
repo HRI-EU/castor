@@ -19,7 +19,10 @@ import io.carbynestack.castor.common.entities.ReservationElement;
 import io.carbynestack.castor.common.entities.TupleType;
 import io.carbynestack.castor.common.exceptions.CastorServiceException;
 import io.carbynestack.castor.service.config.CastorCacheProperties;
+import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentEntity;
 import io.carbynestack.castor.service.persistence.fragmentstore.TupleChunkFragmentStorageService;
+import java.util.Collections;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.Before;
 import org.junit.Test;
@@ -61,14 +64,19 @@ public class ReservationCachingServiceTest {
 
   @Test
   public void givenReservationCannotBeFulfilled_whenKeepReservation_throwCastorServiceException() {
-    UUID chunkId = UUID.fromString("b7b010e0-362b-401c-9560-4cf4b2a68139");
-    ReservationElement reservationElementMock = mock(ReservationElement.class);
+    UUID requestedChunkId = UUID.fromString("b7b010e0-362b-401c-9560-4cf4b2a68139");
+    TupleType requestedTupleType = TupleType.MULTIPLICATION_TRIPLE_GFP;
+    long requestedStartIndex = 0;
+    long requestedNumberOfTuples = 42;
+    ReservationElement reservationElement =
+        new ReservationElement(requestedChunkId, requestedNumberOfTuples, requestedStartIndex);
     Reservation reservationMock = mock(Reservation.class);
     CastorServiceException expectedException = new CastorServiceException("expected");
 
-    doThrow(expectedException)
-        .when(tupleChunkFragmentStorageServiceMock)
-        .applyReservation(reservationMock);
+    when(reservationMock.getReservations()).thenReturn(singletonList(reservationElement));
+    when(tupleChunkFragmentStorageServiceMock.findAvailableFragmentForChunkContainingIndex(
+            requestedChunkId, requestedStartIndex))
+        .thenThrow(expectedException);
 
     CastorServiceException actualCse =
         assertThrows(
@@ -82,23 +90,30 @@ public class ReservationCachingServiceTest {
   public void
       givenNoReservationWithGivenIdInCache_whenKeepReservation_thenStoreInCacheAndEmitConsumption() {
     long consumption = 42;
+    long startIndex = 0;
     UUID chunkId = UUID.fromString("b7b010e0-362b-401c-9560-4cf4b2a68139");
     ReservationElement reservationElementMock = mock(ReservationElement.class);
     String reservationId = "reservationId";
     TupleType tupleType = TupleType.MULTIPLICATION_TRIPLE_GFP;
     Reservation reservationMock = mock(Reservation.class);
+    TupleChunkFragmentEntity fragmentEntityMock = mock(TupleChunkFragmentEntity.class);
 
     when(reservationElementMock.getTupleChunkId()).thenReturn(chunkId);
     when(reservationElementMock.getReservedTuples()).thenReturn(consumption);
+    when(reservationElementMock.getStartIndex()).thenReturn(startIndex);
     when(reservationMock.getReservationId()).thenReturn(reservationId);
     when(reservationMock.getTupleType()).thenReturn(tupleType);
     when(reservationMock.getReservations()).thenReturn(singletonList(reservationElementMock));
     when(valueOperationsMock.get(testCachePrefix + reservationId)).thenReturn(null);
+    when(fragmentEntityMock.getStartIndex()).thenReturn(startIndex);
+    when(fragmentEntityMock.getEndIndex()).thenReturn(consumption);
+    when(tupleChunkFragmentStorageServiceMock.findAvailableFragmentForChunkContainingIndex(
+            chunkId, startIndex))
+        .thenReturn(Optional.of(fragmentEntityMock));
 
     reservationCachingService.keepReservation(reservationMock);
 
     verify(valueOperationsMock).set(testCachePrefix + reservationId, reservationMock);
-    verify(tupleChunkFragmentStorageServiceMock).applyReservation(reservationMock);
     verify(consumptionCachingServiceMock)
         .keepConsumption(anyLong(), eq(tupleType), eq(consumption));
   }
@@ -173,5 +188,43 @@ public class ReservationCachingServiceTest {
     reservationCachingService.forgetReservation(reservationId);
 
     verify(redisTemplateMock).delete(testCachePrefix + reservationId);
+  }
+
+  @Test
+  public void whenReferencedSequenceLiesWithin_whenApplyReservation_thenSplitFragmentAccordingly() {
+    UUID tupleChunkId = UUID.fromString("3fd7eaf7-cda3-4384-8d86-2c43450cbe63");
+    long requestedStartIndex = 42;
+    long requestedLength = 21;
+    ReservationElement re =
+        new ReservationElement(tupleChunkId, requestedLength, requestedStartIndex);
+    String reservationId = "testReservation";
+    TupleType tupleType = TupleType.MULTIPLICATION_TRIPLE_GFP;
+    Reservation r = new Reservation(reservationId, tupleType, Collections.singletonList(re));
+    long existingFragmentStartIndex = 0;
+    long existingFragmentEndIndex = 99;
+    TupleChunkFragmentEntity existingFragment =
+        TupleChunkFragmentEntity.of(
+            tupleChunkId,
+            tupleType,
+            existingFragmentStartIndex,
+            existingFragmentEndIndex,
+            ActivationStatus.UNLOCKED,
+            null);
+
+    when(tupleChunkFragmentStorageServiceMock.splitAt(
+            existingFragment, requestedStartIndex + requestedLength))
+        .thenReturn(existingFragment);
+    when(tupleChunkFragmentStorageServiceMock.splitBefore(existingFragment, requestedStartIndex))
+        .thenReturn(existingFragment);
+    when(tupleChunkFragmentStorageServiceMock.findAvailableFragmentForChunkContainingIndex(
+            tupleChunkId, requestedStartIndex))
+        .thenReturn(Optional.of(existingFragment));
+
+    reservationCachingService.applyReservationRequiresTransaction(r);
+    verify(tupleChunkFragmentStorageServiceMock, times(1)).update(existingFragment);
+    verify(tupleChunkFragmentStorageServiceMock, times(1))
+        .splitBefore(existingFragment, requestedStartIndex);
+    verify(tupleChunkFragmentStorageServiceMock, times(1))
+        .splitAt(existingFragment, requestedStartIndex + requestedLength);
   }
 }
